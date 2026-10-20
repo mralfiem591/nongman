@@ -4,6 +4,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+import webbrowser
 import requests
 
 SFH_SONG_URL = "https://api.songfilehub.com/song/{song_id}"
@@ -12,10 +13,14 @@ SFH_AUDIO_URL = "https://api.songfilehub.com/audio/{hash_id}"
 SFH_BUCKET_URL = "https://bucket.gdmobilewrlist.com/api/bucket/file/{hash_id}"
 NEWGROUNDS_DOWNLOAD_URL = "https://www.newgrounds.com/audio/download/{song_id}"
 
-DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NONGman/1.0.0 https://github.com/mralfiem591/nongman"
-}
+GH_REPO_URL = "https://github.com/mralfiem591/nongman"
+GH_API_LATEST_RELEASE = "https://api.github.com/repos/mralfiem591/nongman/releases/latest"
 
+VERSION = "1.0.2"
+
+DEFAULT_HEADERS = {
+    "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) NONGman/{VERSION} {GH_REPO_URL}"
+}
 
 def get_gd_directory() -> str:
     local_app_data = os.environ.get("LOCALAPPDATA")
@@ -38,6 +43,7 @@ class NongManagerApp:
         self.items_data = {}   # tree item id -> metadata dict for currently visible items
 
         self._build_ui()
+        threading.Thread(target=self._check_for_updates, daemon=True).start()
 
     def _build_ui(self):
         # 1. Top input bar
@@ -145,8 +151,41 @@ class NongManagerApp:
         table_frame.rowconfigure(0, weight=1)
         table_frame.columnconfigure(0, weight=1)
 
+        # Repo & Update info bar (below table, above selected label)
+        repo_frame = ttk.Frame(self.root, padding=(10, 0, 10, 2))
+        repo_frame.pack(fill=tk.X)
+
+        self.repo_label = ttk.Label(
+            repo_frame,
+            text=f"NONGman by mralfiem591. GitHub: {GH_REPO_URL}",
+            cursor="hand2",
+            font=("TkDefaultFont", 10),
+        )
+        self.repo_label.pack(side=tk.LEFT)
+        self.repo_label.bind(
+            "<Button-1>",
+            lambda e: webbrowser.open_new_tab(GH_REPO_URL),
+        )
+
+        self.update_label = tk.Label(
+            repo_frame,
+            text="",
+            bg="#fff3cd",
+            fg="#856404",
+            cursor="hand2",
+            font=("TkDefaultFont", 8, "bold"),
+            padx=5,
+            pady=1,
+            relief="groove",
+            bd=1,
+        )
+        self.update_label.bind(
+            "<Button-1>",
+            lambda e: webbrowser.open_new_tab(f"{GH_REPO_URL}/releases"),
+        )
+
         # 4. Bottom action bar
-        bottom_frame = ttk.Frame(self.root, padding="10")
+        bottom_frame = ttk.Frame(self.root, padding=(10, 1, 10, 2))
         bottom_frame.pack(fill=tk.X)
 
         self.pull_btn = ttk.Button(bottom_frame, text="Pull", command=self.on_pull)
@@ -571,6 +610,25 @@ class NongManagerApp:
             "Download Error",
             f"Failed to download '{track_name}':\n\n{error_msg}",
         )
+
+    def _check_for_updates(self):
+        try:
+            resp = requests.get(GH_API_LATEST_RELEASE, headers=DEFAULT_HEADERS, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json()
+                tag = data.get("tag_name", "").strip()
+                if tag:
+                    # Compare version string with tag on GH
+                    clean_latest = tag.lstrip("vV")
+                    clean_current = VERSION.lstrip("vV")
+                    if clean_latest != clean_current and tag != VERSION:
+                        self.root.after(0, self._show_update_available, tag)
+        except Exception as e:
+            print(f"Error checking for updates: {e}")
+
+    def _show_update_available(self, latest_tag: str):
+        self.update_label.config(text=f"(Update! {VERSION} -> {latest_tag})")
+        self.update_label.pack(side=tk.LEFT, padx=(6, 0))
 
 
 def main():
