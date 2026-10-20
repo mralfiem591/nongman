@@ -1,5 +1,6 @@
 import ctypes
 import errno
+import io
 import os
 import queue
 import tempfile
@@ -7,6 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, simpledialog
 import webbrowser
+import av
 import requests
 
 SFH_SONG_URL = "https://api.songfilehub.com/song/{song_id}"
@@ -18,7 +20,7 @@ NEWGROUNDS_DOWNLOAD_URL = "https://www.newgrounds.com/audio/download/{song_id}"
 GH_REPO_URL = "https://github.com/mralfiem591/nongman"
 GH_API_LATEST_RELEASE = "https://api.github.com/repos/mralfiem591/nongman/releases/latest"
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 DEFAULT_HEADERS = {
     "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) NONGman/{VERSION} {GH_REPO_URL}"
@@ -31,6 +33,61 @@ def get_gd_directory() -> str:
     gd_dir = os.path.join(local_app_data, "GeometryDash")
     os.makedirs(gd_dir, exist_ok=True)
     return gd_dir
+
+
+def ensure_mp3_bytes(audio_bytes: bytes) -> bytes:
+    """
+    Ensures that audio_bytes is in MP3 format.
+    If already MP3, returns it directly without re-encoding.
+    If it is WAV, OGG, or another format, converts it to 320kbps MP3 using PyAV.
+    """
+    if not audio_bytes:
+        return audio_bytes
+
+    # Check if already MP3 (ID3 header or MPEG sync word)
+    if audio_bytes[:3] == b"ID3" or (len(audio_bytes) > 2 and audio_bytes[0] == 0xFF and (audio_bytes[1] & 0xE0) == 0xE0):
+        return audio_bytes
+
+    if b"<!DOCTYPE" in audio_bytes[:50].upper() or b"<HTML" in audio_bytes[:50].upper():
+        raise ValueError("Invalid audio data (received HTML web page).")
+
+    try:
+        inp = io.BytesIO(audio_bytes)
+        in_c = av.open(inp)
+        out_io = io.BytesIO()
+        out_c = av.open(out_io, mode="w", format="mp3")
+
+        audio_stream = None
+        for stream in in_c.streams:
+            if stream.type == "audio":
+                audio_stream = stream
+                break
+
+        if not audio_stream:
+            in_c.close()
+            out_c.close()
+            raise ValueError("No audio stream found in source audio.")
+
+        rate = audio_stream.rate or 44100
+        out_s = out_c.add_stream("libmp3lame", rate=rate)
+        out_s.bit_rate = 320000
+
+        resampler = av.AudioResampler(format="fltp", layout="stereo", rate=rate)
+        for frame in in_c.decode(audio_stream):
+            for r_frame in resampler.resample(frame):
+                for pkt in out_s.encode(r_frame):
+                    out_c.mux(pkt)
+        for r_frame in resampler.resample(None):
+            for pkt in out_s.encode(r_frame):
+                out_c.mux(pkt)
+        for pkt in out_s.encode(None):
+            out_c.mux(pkt)
+
+        out_c.close()
+        in_c.close()
+        return out_io.getvalue()
+    except Exception as e:
+        raise ValueError(f"Failed to convert audio to MP3: {e}")
 
 
 class NongManagerApp:
@@ -423,19 +480,20 @@ class NongManagerApp:
                 },
             })
 
-        # Insert NONGs (MP3 files only)
-        non_mp3_exts = (".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aiff", ".zip", ".rar")
+        # Insert NONGs (MP3, WAV, and OGG supported; WAV and OGG are automatically converted to MP3)
+        supported_types = ("mp3", "wav", "ogg")
+        unsupported_exts = (".zip", ".rar", ".7z", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aiff")
         for nong in nongs:
             # Check explicit filetype attribute
             filetype = (nong.get("filetype") or "").strip().lower()
-            if filetype and filetype != "mp3":
+            if filetype and filetype not in supported_types:
                 continue
 
-            # Check URLs or track name for non-mp3 extensions if filetype was unspecified
+            # Check URLs or track name for unsupported extensions if filetype was unspecified
             download_url = (nong.get("downloadUrl") or "").lower()
             song_url = (nong.get("songURL") or "").lower()
             name_str = (nong.get("songName") or nong.get("name") or "").lower()
-            if any(name_str.endswith(ext) or ext in download_url or ext in song_url for ext in non_mp3_exts):
+            if any(name_str.endswith(ext) or ext in download_url or ext in song_url for ext in unsupported_exts):
                 continue
 
             name = nong.get("songName") or nong.get("name") or "Unknown Song"
@@ -446,6 +504,8 @@ class NongManagerApp:
             downloads = nong.get("downloads")
 
             details_parts = []
+            if filetype and filetype in ("wav", "ogg"):
+                details_parts.append(f"{filetype.upper()} -> MP3")
             if level_id:
                 details_parts.append(f"Level: {level_id}")
             if state:
@@ -605,7 +665,7 @@ class NongManagerApp:
                 else:
                     raise ValueError("No download URL or hash available for this NONG.")
 
-            return audio_bytes
+            return ensure_mp3_bytes(audio_bytes)
 
     def _pull_worker(self, meta: dict):
         song_id = meta.get("song_id") or self.current_song_id
@@ -669,28 +729,38 @@ class NongManagerApp:
 
         file_path = filedialog.askopenfilename(
             parent=self.root,
-            title=f"Select MP3 File for Song ID {song_id}",
+            title=f"Select Audio File for Song ID {song_id}",
             filetypes=[
+                ("Supported Audio (*.mp3;*.wav;*.ogg)", "*.mp3;*.wav;*.ogg"),
                 ("MP3 Audio (*.mp3)", "*.mp3"),
+                ("WAV Audio (*.wav)", "*.wav"),
+                ("OGG Audio (*.ogg)", "*.ogg"),
+                ("All Files (*.*)", "*.*"),
             ],
         )
         if not file_path:
             return
 
-        if not file_path.lower().endswith(".mp3"):
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext not in (".mp3", ".wav", ".ogg"):
             messagebox.showerror(
                 "Invalid File Type",
-                "Geometry Dash only supports .mp3 tracks.\nPlease select a valid .mp3 file.",
+                "Unsupported audio file type.\nPlease select an MP3, WAV, or OGG file (WAV and OGG will be automatically converted to MP3 for Geometry Dash).",
             )
             return
 
         try:
             with open(file_path, "rb") as f:
-                audio_bytes = f.read()
+                raw_bytes = f.read()
 
-            if not audio_bytes:
+            if not raw_bytes:
                 messagebox.showerror("Error", "The selected file is empty.")
                 return
+
+            self.status_var.set(f"Processing '{os.path.basename(file_path)}'...")
+            self.root.update_idletasks()
+
+            audio_bytes = ensure_mp3_bytes(raw_bytes)
 
             gd_dir = get_gd_directory()
             target_filename = f"{song_id}.mp3"
@@ -700,14 +770,15 @@ class NongManagerApp:
             write_success = self._write_song_file(target_path, target_filename, audio_bytes)
             if write_success:
                 source_name = os.path.basename(file_path)
-                self.status_var.set(f"Successfully installed '{source_name}' as '{target_filename}'!")
+                converted_note = " (converted to MP3)" if ext in (".wav", ".ogg") else ""
+                self.status_var.set(f"Successfully installed '{source_name}'{converted_note} as '{target_filename}'!")
                 messagebox.showinfo(
                     "Success",
-                    f"Successfully installed '{source_name}' as '{target_filename}'!\n\n"
+                    f"Successfully installed '{source_name}'{converted_note} as '{target_filename}'!\n\n"
                     f"Saved to:\n{target_path}\n\nGeometry Dash will now use this audio file.",
                 )
         except Exception as err:
-            messagebox.showerror("File Error", f"Failed to read or copy local file:\n\n{err}")
+            messagebox.showerror("File Error", f"Failed to process or copy audio file:\n\n{err}")
 
     def on_pull_from_url(self):
         song_id = self._get_target_song_id()
@@ -716,7 +787,7 @@ class NongManagerApp:
 
         url = simpledialog.askstring(
             "Pull from URL",
-            f"Enter direct audio URL for Song ID {song_id} (http/https):",
+            f"Enter direct audio URL for Song ID {song_id} (MP3, WAV, or OGG):",
             parent=self.root,
         )
         if not url or not url.strip():
@@ -727,12 +798,12 @@ class NongManagerApp:
             messagebox.showerror("Invalid URL", "Please enter a valid HTTP or HTTPS URL.")
             return
 
-        non_mp3_exts = (".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aiff")
+        unsupported_exts = (".zip", ".rar", ".7z", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aiff")
         url_path = url.split("?")[0].lower()
-        if any(url_path.endswith(ext) for ext in non_mp3_exts):
+        if any(url_path.endswith(ext) for ext in unsupported_exts):
             messagebox.showerror(
                 "Invalid Audio Format",
-                "NONGman only supports .mp3 files, as that is what Geometry Dash builds its NG tracks around.",
+                "NONGman currently supports .mp3, .wav, and .ogg files (WAV and OGG will be automatically converted to MP3).",
             )
             return
 
@@ -745,13 +816,13 @@ class NongManagerApp:
         try:
             resp = requests.get(url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=30)
             resp.raise_for_status()
-            audio_bytes = resp.content
+            raw_bytes = resp.content
 
-            if len(audio_bytes) < 100 or b"<!DOCTYPE" in audio_bytes[:50].upper() or b"<HTML" in audio_bytes[:50].upper():
+            if len(raw_bytes) < 100 or b"<!DOCTYPE" in raw_bytes[:50].upper() or b"<HTML" in raw_bytes[:50].upper():
                 raise ValueError("The provided URL returned an HTML web page rather than direct audio.\nPlease provide a direct download URL.")
 
-            if audio_bytes.startswith(b"RIFF") or audio_bytes.startswith(b"OggS") or audio_bytes.startswith(b"fLaC"):
-                raise ValueError("The audio file at this URL is not an MP3 file.\nNONGman only supports mp3 tracks.")
+            self.root.after(0, lambda: self.status_var.set(f"Converting audio for Song ID '{song_id}'..."))
+            audio_bytes = ensure_mp3_bytes(raw_bytes)
 
             gd_dir = get_gd_directory()
             target_filename = f"{song_id}.mp3"
