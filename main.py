@@ -1,9 +1,11 @@
+import ctypes
 import errno
 import os
 import queue
+import tempfile
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import webbrowser
 import requests
 
@@ -16,7 +18,7 @@ NEWGROUNDS_DOWNLOAD_URL = "https://www.newgrounds.com/audio/download/{song_id}"
 GH_REPO_URL = "https://github.com/mralfiem591/nongman"
 GH_API_LATEST_RELEASE = "https://api.github.com/repos/mralfiem591/nongman/releases/latest"
 
-VERSION = "1.0.2"
+VERSION = "1.1.0"
 
 DEFAULT_HEADERS = {
     "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) NONGman/{VERSION} {GH_REPO_URL}"
@@ -34,7 +36,7 @@ def get_gd_directory() -> str:
 class NongManagerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Geometry Dash NONG Manager")
+        self.root.title("NONGman by mralfiem591")
         self.root.geometry("820x520")
         self.root.minsize(680, 400)
 
@@ -42,7 +44,9 @@ class NongManagerApp:
         self.all_records = []  # List of dicts representing all fetched results
         self.items_data = {}   # tree item id -> metadata dict for currently visible items
 
+        self.is_playing_preview = False
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         threading.Thread(target=self._check_for_updates, daemon=True).start()
 
     def _build_ui(self):
@@ -189,7 +193,16 @@ class NongManagerApp:
         bottom_frame.pack(fill=tk.X)
 
         self.pull_btn = ttk.Button(bottom_frame, text="Pull", command=self.on_pull)
-        self.pull_btn.pack(side=tk.RIGHT)
+        self.pull_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.pull_url_btn = ttk.Button(bottom_frame, text="Pull from URL...", command=self.on_pull_from_url)
+        self.pull_url_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.select_file_btn = ttk.Button(bottom_frame, text="Select Local File...", command=self.on_select_local_file)
+        self.select_file_btn.pack(side=tk.RIGHT, padx=(4, 0))
+
+        self.preview_btn = ttk.Button(bottom_frame, text="Preview", command=self.on_preview)
+        self.preview_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
         self.selected_var = tk.StringVar(value="No track selected.")
         self.selected_label = ttk.Label(bottom_frame, textvariable=self.selected_var)
@@ -198,10 +211,21 @@ class NongManagerApp:
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Double-1>", lambda event: self.on_pull())
 
+        # Right-click context menu for rows in table
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Preview", command=self.on_preview)
+        self.context_menu.add_command(label="Preview (Ext.)", command=self.on_preview_external)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="Pull", command=self.on_pull)
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
+
     def _set_ui_busy(self, busy: bool):
         state = tk.DISABLED if busy else tk.NORMAL
         self.search_btn.config(state=state)
         self.pull_btn.config(state=state)
+        self.preview_btn.config(state=state)
+        self.pull_url_btn.config(state=state)
+        self.select_file_btn.config(state=state)
         self.song_id_entry.config(state=state)
         self.filter_entry.config(state=state)
         self.clear_filter_btn.config(state=state)
@@ -306,6 +330,7 @@ class NongManagerApp:
             self.selected_var.set(f"Selected: {meta.get('name', 'Unknown')}")
 
     def on_search(self):
+        self.stop_preview()
         song_id = self.song_id_var.get().strip()
         if not song_id:
             messagebox.showwarning("Input Required", "Please enter a valid Song ID.")
@@ -398,8 +423,21 @@ class NongManagerApp:
                 },
             })
 
-        # Insert NONGs
+        # Insert NONGs (MP3 files only)
+        non_mp3_exts = (".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aiff", ".zip", ".rar")
         for nong in nongs:
+            # Check explicit filetype attribute
+            filetype = (nong.get("filetype") or "").strip().lower()
+            if filetype and filetype != "mp3":
+                continue
+
+            # Check URLs or track name for non-mp3 extensions if filetype was unspecified
+            download_url = (nong.get("downloadUrl") or "").lower()
+            song_url = (nong.get("songURL") or "").lower()
+            name_str = (nong.get("songName") or nong.get("name") or "").lower()
+            if any(name_str.endswith(ext) or ext in download_url or ext in song_url for ext in non_mp3_exts):
+                continue
+
             name = nong.get("songName") or nong.get("name") or "Unknown Song"
             author = nong.get("createdBy") or "Unknown"
             hash_val = nong.get("urlHash") or nong.get("_id") or ""
@@ -531,61 +569,59 @@ class NongManagerApp:
                 )
                 return False
 
+    def _fetch_audio_bytes(self, meta: dict) -> bytes:
+        is_original = meta.get("is_original", False)
+        song_id = meta.get("song_id") or self.current_song_id
+
+        if is_original:
+            download_url = meta.get("download_url") or NEWGROUNDS_DOWNLOAD_URL.format(song_id=song_id)
+            resp = requests.get(download_url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=30)
+            resp.raise_for_status()
+            return resp.content
+        else:
+            hash_id = meta.get("hash")
+            raw = meta.get("raw", {})
+            audio_bytes = None
+
+            if hash_id:
+                sfh_audio_url = SFH_AUDIO_URL.format(hash_id=hash_id)
+                try:
+                    resp = requests.get(sfh_audio_url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=20)
+                    content_type = resp.headers.get("Content-Type", "")
+                    if resp.status_code == 200 and not content_type.startswith("text/html"):
+                        if len(resp.content) > 1024:
+                            first_bytes = resp.content[:16]
+                            if not (b"<!DOCTYPE" in first_bytes.upper() or b"<HTML" in first_bytes.upper()):
+                                audio_bytes = resp.content
+                except Exception as e:
+                    print(f"Direct /audio/ download attempt failed: {e}")
+
+            if audio_bytes is None:
+                direct_url = raw.get("downloadUrl") or (SFH_BUCKET_URL.format(hash_id=hash_id) if hash_id else None)
+                if direct_url:
+                    resp = requests.get(direct_url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=30)
+                    resp.raise_for_status()
+                    audio_bytes = resp.content
+                else:
+                    raise ValueError("No download URL or hash available for this NONG.")
+
+            return audio_bytes
+
     def _pull_worker(self, meta: dict):
         song_id = meta.get("song_id") or self.current_song_id
-        is_original = meta.get("is_original", False)
         track_name = meta.get("name", "Track")
 
         try:
             gd_dir = get_gd_directory()
             target_filename = f"{song_id}.mp3"
             target_path = os.path.join(gd_dir, target_filename)
-            audio_bytes = None
 
-            if is_original:
-                # Download from Newgrounds
-                download_url = meta.get("download_url") or NEWGROUNDS_DOWNLOAD_URL.format(song_id=song_id)
-                resp = requests.get(download_url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=30)
-                resp.raise_for_status()
-                audio_bytes = resp.content
-            else:
-                # Download NONG
-                hash_id = meta.get("hash")
-                raw = meta.get("raw", {})
+            audio_bytes = self._fetch_audio_bytes(meta)
 
-                # 1. Attempt GET https://api.songfilehub.com/audio/<unique_audio_hash>
-                if hash_id:
-                    sfh_audio_url = SFH_AUDIO_URL.format(hash_id=hash_id)
-                    try:
-                        resp = requests.get(sfh_audio_url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=20)
-                        content_type = resp.headers.get("Content-Type", "")
-
-                        # Ensure it's not returning an HTML wrapper page
-                        if resp.status_code == 200 and not content_type.startswith("text/html"):
-                            if len(resp.content) > 1024:
-                                first_bytes = resp.content[:16]
-                                if not (b"<!DOCTYPE" in first_bytes.upper() or b"<HTML" in first_bytes.upper()):
-                                    audio_bytes = resp.content
-                    except Exception as e:
-                        print(f"Direct /audio/ download attempt failed: {e}")
-
-                # 2. Fallback to downloadUrl or direct bucket if the direct endpoint returned HTML or failed
-                if audio_bytes is None:
-                    direct_url = raw.get("downloadUrl") or (SFH_BUCKET_URL.format(hash_id=hash_id) if hash_id else None)
-                    if direct_url:
-                        resp = requests.get(direct_url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=30)
-                        resp.raise_for_status()
-                        audio_bytes = resp.content
-                    else:
-                        raise ValueError("No download URL or hash available for this NONG.")
-
-            # Attempt writing file with ErrNo 13 handling
             write_success = self._write_song_file(target_path, target_filename, audio_bytes)
-
             if write_success:
                 self.root.after(0, self._on_pull_success, track_name, target_path)
             else:
-                # Return safely to NONG browser
                 self.root.after(0, self._reset_after_pull_cancelled)
 
         except Exception as err:
@@ -610,6 +646,263 @@ class NongManagerApp:
             "Download Error",
             f"Failed to download '{track_name}':\n\n{error_msg}",
         )
+
+    def _get_target_song_id(self) -> str:
+        song_id = self.song_id_var.get().strip() or self.current_song_id
+        if not song_id:
+            prompt_res = simpledialog.askstring(
+                "Song ID Required",
+                "Enter the target Geometry Dash Song ID to replace:",
+                parent=self.root,
+            )
+            if prompt_res and prompt_res.strip():
+                song_id = prompt_res.strip()
+                self.song_id_var.set(song_id)
+            else:
+                return ""
+        return song_id
+
+    def on_select_local_file(self):
+        song_id = self._get_target_song_id()
+        if not song_id:
+            return
+
+        file_path = filedialog.askopenfilename(
+            parent=self.root,
+            title=f"Select MP3 File for Song ID {song_id}",
+            filetypes=[
+                ("MP3 Audio (*.mp3)", "*.mp3"),
+            ],
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".mp3"):
+            messagebox.showerror(
+                "Invalid File Type",
+                "Geometry Dash only supports .mp3 tracks.\nPlease select a valid .mp3 file.",
+            )
+            return
+
+        try:
+            with open(file_path, "rb") as f:
+                audio_bytes = f.read()
+
+            if not audio_bytes:
+                messagebox.showerror("Error", "The selected file is empty.")
+                return
+
+            gd_dir = get_gd_directory()
+            target_filename = f"{song_id}.mp3"
+            target_path = os.path.join(gd_dir, target_filename)
+
+            # Write file with ErrNo 13 handling
+            write_success = self._write_song_file(target_path, target_filename, audio_bytes)
+            if write_success:
+                source_name = os.path.basename(file_path)
+                self.status_var.set(f"Successfully installed '{source_name}' as '{target_filename}'!")
+                messagebox.showinfo(
+                    "Success",
+                    f"Successfully installed '{source_name}' as '{target_filename}'!\n\n"
+                    f"Saved to:\n{target_path}\n\nGeometry Dash will now use this audio file.",
+                )
+        except Exception as err:
+            messagebox.showerror("File Error", f"Failed to read or copy local file:\n\n{err}")
+
+    def on_pull_from_url(self):
+        song_id = self._get_target_song_id()
+        if not song_id:
+            return
+
+        url = simpledialog.askstring(
+            "Pull from URL",
+            f"Enter direct audio URL for Song ID {song_id} (http/https):",
+            parent=self.root,
+        )
+        if not url or not url.strip():
+            return
+        url = url.strip()
+
+        if not (url.startswith("http://") or url.startswith("https://")):
+            messagebox.showerror("Invalid URL", "Please enter a valid HTTP or HTTPS URL.")
+            return
+
+        non_mp3_exts = (".wav", ".ogg", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aiff")
+        url_path = url.split("?")[0].lower()
+        if any(url_path.endswith(ext) for ext in non_mp3_exts):
+            messagebox.showerror(
+                "Invalid Audio Format",
+                "NONGman only supports .mp3 files, as that is what Geometry Dash builds its NG tracks around.",
+            )
+            return
+
+        self._set_ui_busy(True)
+        self.status_var.set(f"Downloading audio from URL for Song ID '{song_id}'...")
+
+        threading.Thread(target=self._pull_url_worker, args=(url, song_id), daemon=True).start()
+
+    def _pull_url_worker(self, url: str, song_id: str):
+        try:
+            resp = requests.get(url, headers=DEFAULT_HEADERS, allow_redirects=True, timeout=30)
+            resp.raise_for_status()
+            audio_bytes = resp.content
+
+            if len(audio_bytes) < 100 or b"<!DOCTYPE" in audio_bytes[:50].upper() or b"<HTML" in audio_bytes[:50].upper():
+                raise ValueError("The provided URL returned an HTML web page rather than direct audio.\nPlease provide a direct download URL.")
+
+            if audio_bytes.startswith(b"RIFF") or audio_bytes.startswith(b"OggS") or audio_bytes.startswith(b"fLaC"):
+                raise ValueError("The audio file at this URL is not an MP3 file.\nNONGman only supports mp3 tracks.")
+
+            gd_dir = get_gd_directory()
+            target_filename = f"{song_id}.mp3"
+            target_path = os.path.join(gd_dir, target_filename)
+
+            write_success = self._write_song_file(target_path, target_filename, audio_bytes)
+            if write_success:
+                self.root.after(0, self._on_pull_success, f"URL Audio ({song_id})", target_path)
+            else:
+                self.root.after(0, self._reset_after_pull_cancelled)
+
+        except Exception as err:
+            self.root.after(0, self._on_pull_error, f"URL Audio ({song_id})", str(err))
+
+    def _on_tree_right_click(self, event):
+        item_id = self.tree.identify_row(event.y)
+        if item_id:
+            self.tree.selection_set(item_id)
+            self._on_tree_select(None)
+            self.context_menu.post(event.x_root, event.y_root)
+
+    def _get_preview_file_path(self, meta: dict) -> str:
+        temp_dir = os.path.join(tempfile.gettempdir(), "NONGman_previews")
+        os.makedirs(temp_dir, exist_ok=True)
+        if meta.get("is_original"):
+            song_id = meta.get("song_id") or "original"
+            filename = f"preview_ng_{song_id}.mp3"
+        else:
+            hash_val = meta.get("hash") or meta.get("raw", {}).get("_id") or "nong"
+            safe_hash = "".join(c for c in hash_val if c.isalnum() or c in "-_")
+            filename = f"preview_{safe_hash}.mp3"
+        return os.path.join(temp_dir, filename)
+
+    def on_preview(self):
+        if self.is_playing_preview:
+            self.stop_preview()
+            return
+
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Selection Required", "Please select a track from the table to preview.")
+            return
+
+        item_id = selected[0]
+        meta = self.items_data.get(item_id)
+        if not meta:
+            return
+
+        track_name = meta.get("name", "Track")
+        preview_file = self._get_preview_file_path(meta)
+
+        if os.path.exists(preview_file) and os.path.getsize(preview_file) > 1024:
+            self._start_mci_playback(preview_file, track_name)
+        else:
+            self.preview_btn.config(text="Loading...")
+            self.status_var.set(f"Fetching preview for '{track_name}'...")
+            threading.Thread(target=self._preview_worker, args=(meta, preview_file, False), daemon=True).start()
+
+    def on_preview_external(self):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showwarning("Selection Required", "Please select a track from the table to preview.")
+            return
+
+        item_id = selected[0]
+        meta = self.items_data.get(item_id)
+        if not meta:
+            return
+
+        track_name = meta.get("name", "Track")
+        preview_file = self._get_preview_file_path(meta)
+
+        if os.path.exists(preview_file) and os.path.getsize(preview_file) > 1024:
+            os.startfile(preview_file)
+            self.status_var.set(f"Opened '{track_name}' in external player.")
+        else:
+            self.status_var.set(f"Fetching preview for '{track_name}'...")
+            threading.Thread(target=self._preview_worker, args=(meta, preview_file, True), daemon=True).start()
+
+    def _preview_worker(self, meta: dict, preview_file: str, open_external: bool):
+        track_name = meta.get("name", "Track")
+        try:
+            audio_bytes = self._fetch_audio_bytes(meta)
+            with open(preview_file, "wb") as f:
+                f.write(audio_bytes)
+
+            if open_external:
+                os.startfile(preview_file)
+                self.root.after(0, lambda: self.status_var.set(f"Opened '{track_name}' in external player."))
+                self.root.after(0, lambda: self.preview_btn.config(text="Preview"))
+            else:
+                self.root.after(0, self._start_mci_playback, preview_file, track_name)
+        except Exception as err:
+            self.root.after(0, lambda: self.preview_btn.config(text="Preview"))
+            self.root.after(0, lambda: self.status_var.set("Failed to load preview."))
+            self.root.after(0, messagebox.showerror, "Preview Error", f"Could not load preview for '{track_name}':\n\n{err}")
+
+    def _start_mci_playback(self, preview_file: str, track_name: str):
+        self.stop_preview()
+        try:
+            winmm = ctypes.windll.winmm
+            winmm.mciSendStringW("close nong_preview", None, 0, 0)
+
+            cmd_open = f'open "{preview_file}" type mpegvideo alias nong_preview'
+            res_open = winmm.mciSendStringW(cmd_open, None, 0, 0)
+            if res_open != 0:
+                os.startfile(preview_file)
+                self.status_var.set(f"Opened '{track_name}' in external player.")
+                return
+
+            res_play = winmm.mciSendStringW("play nong_preview", None, 0, 0)
+            if res_play != 0:
+                os.startfile(preview_file)
+                self.status_var.set(f"Opened '{track_name}' in external player.")
+                return
+
+            self.is_playing_preview = True
+            self.preview_btn.config(text="Stop Listening")
+            self.status_var.set(f"Playing preview: '{track_name}'")
+            self._poll_preview_status()
+        except Exception as e:
+            print(f"Error starting playback: {e}")
+            os.startfile(preview_file)
+
+    def stop_preview(self):
+        if self.is_playing_preview:
+            try:
+                winmm = ctypes.windll.winmm
+                winmm.mciSendStringW("stop nong_preview", None, 0, 0)
+                winmm.mciSendStringW("close nong_preview", None, 0, 0)
+            except Exception:
+                pass
+            self.is_playing_preview = False
+            self.preview_btn.config(text="Preview")
+
+    def _poll_preview_status(self):
+        if not self.is_playing_preview:
+            return
+
+        buf = ctypes.create_unicode_buffer(64)
+        winmm = ctypes.windll.winmm
+        res = winmm.mciSendStringW("status nong_preview mode", buf, 64, 0)
+        if res == 0 and buf.value.lower() == "stopped":
+            self.stop_preview()
+            self.status_var.set("Ready.")
+        else:
+            self.root.after(500, self._poll_preview_status)
+
+    def on_closing(self):
+        self.stop_preview()
+        self.root.destroy()
 
     def _check_for_updates(self):
         try:
