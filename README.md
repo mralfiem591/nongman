@@ -10,6 +10,14 @@ A NONG means "Not On NewGrounds". It is any track that does not exist on Newgrou
 ## By using NONGman, am I locking myself out of the original song?
 **No!** NONGman can revert most changes by pulling the original from Newgrounds (you will see the original song as an entry in available NONGs). However, this is not guaranteed to work for all songs. In those cases, delete the track in Geometry Dash, and redownload it ingame.
 
+## "You scammer! Windows is giving me a popup when I try to run your app!"
+NONGman is completely safe. Windows gives a popup because I don't go through their hassle of signing my app. If you really don't trust it that much, either don't use it, or read the source code and run it yourself.
+
+## Speaking of that, how do you run it yourself?
+- Clone: `git clone https://github.com/mralfiem591/nongman.git`
+- Sync: `uv sync`
+- Run: `uv run main.py`
+
 ## Credits
 - **Jukebox**: For inspiring this project
 - **SFH**: For hosting the NONG database used
