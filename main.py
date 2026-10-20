@@ -13,7 +13,7 @@ SFH_BUCKET_URL = "https://bucket.gdmobilewrlist.com/api/bucket/file/{hash_id}"
 NEWGROUNDS_DOWNLOAD_URL = "https://www.newgrounds.com/audio/download/{song_id}"
 
 DEFAULT_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) GeometryDashNongManager/1.0"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) NONGman/1.0.0 https://github.com/mralfiem591/nongman"
 }
 
 
@@ -344,7 +344,7 @@ class NongManagerApp:
         # Insert Original track at the top if found
         if original_track_found:
             self.all_records.append({
-                "type_label": "original",
+                "type_label": "Original",
                 "state": "original",
                 "name": "Original track",
                 "author": "Newgrounds",
