@@ -1,0 +1,13 @@
+[project]
+name = "NONGman"
+version = "0.1.0"
+description = "External NONG browser and downloader for Geometry Dash."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pyinstaller>=6.22.3",
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+nong = "main:main"
