@@ -93,9 +93,9 @@ def ensure_mp3_bytes(audio_bytes: bytes) -> bytes:
 class NongManagerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("NONGman by mralfiem591")
-        self.root.geometry("820x520")
-        self.root.minsize(680, 400)
+        self.root.title(f"NONGman by mralfiem591 ({VERSION})")
+        self.root.geometry("860x520")
+        self.root.minsize(700, 400)
 
         self.current_song_id = ""
         self.all_records = []  # List of dicts representing all fetched results
@@ -130,7 +130,7 @@ class NongManagerApp:
         controls_frame = ttk.Frame(self.root, padding=(10, 0, 10, 8))
         controls_frame.pack(fill=tk.X)
 
-        # Text Filter (filters Name and Author only)
+        # Text Filter (filters Name, Author, Level ID, and Hash)
         ttk.Label(controls_frame, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
         self.filter_var = tk.StringVar()
         self.filter_entry = ttk.Entry(controls_frame, textvariable=self.filter_var, width=16)
@@ -153,7 +153,7 @@ class NongManagerApp:
         self.type_filter_cb.pack(side=tk.LEFT, padx=(0, 10))
         self.type_filter_cb.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
 
-        # Sort By Combobox (Name, Author, Hash)
+        # Sort By Combobox (Name, Author, Type, DLs, LevelID, Hash)
         ttk.Label(controls_frame, text="Sort By:").pack(side=tk.LEFT, padx=(0, 4))
         self.sort_by_var = tk.StringVar(value="Name")
         self.sort_by_cb = ttk.Combobox(
@@ -161,7 +161,7 @@ class NongManagerApp:
             textvariable=self.sort_by_var,
             state="readonly",
             width=8,
-            values=["Name", "Author", "Hash"],
+            values=["Name", "Author", "Type", "DLs", "LevelID", "Hash"],
         )
         self.sort_by_cb.pack(side=tk.LEFT, padx=(0, 4))
         self.sort_by_cb.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
@@ -185,20 +185,38 @@ class NongManagerApp:
         table_frame = ttk.Frame(self.root, padding=(10, 0, 10, 10))
         table_frame.pack(fill=tk.BOTH, expand=True)
 
-        columns = ("type", "name", "author", "details", "hash")
+        columns = ("source", "name", "author", "dls", "type", "level_id", "format", "hash")
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", selectmode="browse")
 
-        self.tree.heading("type", text="Type")
-        self.tree.heading("name", text="Track Name")
-        self.tree.heading("author", text="Author / Creator")
-        self.tree.heading("details", text="Details")
-        self.tree.heading("hash", text="Audio Hash")
+        self.tree.heading("source", text="Source", anchor=tk.CENTER)
+        self.tree.heading("name", text="Track Name", anchor=tk.W)
+        self.tree.heading("author", text="Author / Creator", anchor=tk.W)
+        self.tree.heading("dls", text="DLs", anchor=tk.CENTER)
+        self.tree.heading("type", text="Type", anchor=tk.CENTER)
+        self.tree.heading("level_id", text="Level ID", anchor=tk.CENTER)
+        self.tree.heading("format", text="Format", anchor=tk.CENTER)
+        self.tree.heading("hash", text="Audio Hash", anchor=tk.W)
 
-        self.tree.column("type", width=110, minwidth=90, stretch=False)
-        self.tree.column("name", width=280, minwidth=180)
-        self.tree.column("author", width=140, minwidth=100)
-        self.tree.column("details", width=120, minwidth=80)
-        self.tree.column("hash", width=110, minwidth=80)
+        self.tree.column("source", width=75, minwidth=65, stretch=False, anchor=tk.CENTER)
+        self.tree.column("name", width=240, minwidth=140)
+        self.tree.column("author", width=130, minwidth=90)
+        self.tree.column("dls", width=65, minwidth=50, stretch=False, anchor=tk.CENTER)
+        self.tree.column("type", width=75, minwidth=60, stretch=False, anchor=tk.CENTER)
+        self.tree.column("level_id", width=80, minwidth=60, stretch=False, anchor=tk.CENTER)
+        self.tree.column("format", width=85, minwidth=65, stretch=False, anchor=tk.CENTER)
+        self.tree.column("hash", width=90, minwidth=70)
+
+        # Style map and tag configuration for green highlight
+        style = ttk.Style()
+        def fixed_map(option):
+            return [elm for elm in style.map("Treeview", query_opt=option) if elm[:2] != ("!disabled", "!selected")]
+        style.map("Treeview", foreground=fixed_map("foreground"), background=fixed_map("background"))
+
+        self.tree.tag_configure(
+            "green_highlight",
+            foreground="#157347",
+            font=("TkDefaultFont", 9, "bold"),
+        )
 
         # Scrollbars
         y_scroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.tree.yview)
@@ -218,7 +236,7 @@ class NongManagerApp:
 
         self.repo_label = ttk.Label(
             repo_frame,
-            text=f"NONGman by mralfiem591. GitHub: {GH_REPO_URL}",
+            text=f"NONGman ({VERSION}) by mralfiem591. GitHub: {GH_REPO_URL}",
             cursor="hand2",
             font=("TkDefaultFont", 10),
         )
@@ -317,42 +335,83 @@ class NongManagerApp:
                 if record["state"].lower() != selected_type.lower():
                     continue
 
-            # Text filter: ONLY search by Name and Author (do NOT search Details or Type)
+            # Text filter: search by Track Name, Author/Creator, Level ID, and Audio Hash
+            # (do NOT search Source, DLs, Type, or Format)
             if query:
                 name_match = query in record["name"].lower()
                 author_match = query in record["author"].lower()
-                if not (name_match or author_match):
+                level_id_val = record.get("level_id", "")
+                level_match = bool(level_id_val and level_id_val != "-" and query in str(level_id_val).lower())
+                hash_match = query in record.get("hash", "").lower()
+                if not (name_match or author_match or level_match or hash_match):
                     continue
 
             filtered_records.append(record)
 
         # 2. Sort records
-        sort_field = self.sort_by_var.get().strip().lower()  # "name", "author", or "hash"
+        sort_field_map = {
+            "name": "name",
+            "author": "author",
+            "type": "state",
+            "dls": "dls",
+            "levelid": "level_id",
+            "hash": "hash",
+        }
+        raw_sort = self.sort_by_var.get().strip().lower()
+        sort_field = sort_field_map.get(raw_sort, "name")
         reverse = (self.sort_dir_var.get() == "D")
 
-        # Keep original track at the top if present, sort NONGs
+        # Three groups:
+        # 1. Original Newgrounds track (always at the very top)
+        # 2. Intended NONGs (state is 'rated' or 'unrated') -> placed immediately below NG entry
+        # 3. Other NONGs (state not in 'rated', 'unrated') -> placed below intended NONGs
         originals = [r for r in filtered_records if r["is_original"]]
-        nongs = [r for r in filtered_records if not r["is_original"]]
+        intended_nongs = [r for r in filtered_records if not r["is_original"] and r.get("state", "").lower() in ("rated", "unrated")]
+        other_nongs = [r for r in filtered_records if not r["is_original"] and r.get("state", "").lower() not in ("rated", "unrated")]
 
         def get_sort_key(r):
-            val = r.get(sort_field) or ""
-            return val.lower()
+            if sort_field == "dls":
+                raw_dls = r.get("raw_dls")
+                if raw_dls is not None:
+                    try:
+                        return (0, int(raw_dls))
+                    except (ValueError, TypeError):
+                        pass
+                return (1, -1)
+            elif sort_field == "level_id":
+                val = r.get("level_id") or ""
+                try:
+                    return (0, int(val))
+                except (ValueError, TypeError):
+                    return (1, str(val).lower())
+            else:
+                val = r.get(sort_field) or ""
+                return (0, str(val).lower())
 
-        nongs.sort(key=get_sort_key, reverse=reverse)
-        display_records = originals + nongs
+        intended_nongs.sort(key=get_sort_key, reverse=reverse)
+        other_nongs.sort(key=get_sort_key, reverse=reverse)
+
+        display_records = originals + intended_nongs + other_nongs
 
         # 3. Populate Treeview
         for record in display_records:
+            is_green = record["is_original"] or (record.get("state", "").lower() in ("rated", "unrated"))
+            tags = ("green_highlight",) if is_green else ()
+
             item_id = self.tree.insert(
                 "",
                 tk.END,
                 values=(
-                    record["type_label"],
+                    record["source"],
                     record["name"],
                     record["author"],
-                    record["details"],
+                    record["dls"],
+                    record["type"],
+                    record["level_id"],
+                    record["format"],
                     record["hash"],
                 ),
+                tags=tags,
             )
             self.items_data[item_id] = record["meta"]
 
@@ -465,11 +524,15 @@ class NongManagerApp:
         # Insert Original track at the top if found
         if original_track_found:
             self.all_records.append({
-                "type_label": "Original",
+                "source": "Original",
                 "state": "original",
                 "name": "Original track",
                 "author": "Newgrounds",
-                "details": "Official Newgrounds Audio",
+                "dls": "-",
+                "raw_dls": None,
+                "type": "original",
+                "level_id": "-",
+                "format": "MP3",
                 "hash": "newgrounds",
                 "is_original": True,
                 "meta": {
@@ -503,23 +566,29 @@ class NongManagerApp:
             state = nong.get("state") or "unrated"
             downloads = nong.get("downloads")
 
-            details_parts = []
-            if filetype and filetype in ("wav", "ogg"):
-                details_parts.append(f"{filetype.upper()} -> MP3")
-            if level_id:
-                details_parts.append(f"Level: {level_id}")
-            if state:
-                details_parts.append(str(state))
-            if downloads is not None:
-                details_parts.append(f"{downloads} DLs")
-            details = " | ".join(details_parts) if details_parts else "NONG"
+            # Determine audio format
+            if not filetype:
+                if name_str.endswith(".wav") or ".wav" in download_url or ".wav" in song_url:
+                    filetype = "wav"
+                elif name_str.endswith(".ogg") or ".ogg" in download_url or ".ogg" in song_url:
+                    filetype = "ogg"
+                else:
+                    filetype = "mp3"
+
+            format_str = f"{filetype.upper()} -> MP3" if filetype in ("wav", "ogg") else "MP3"
+            dls_str = str(downloads) if downloads is not None else "-"
+            level_str = str(level_id) if level_id else "-"
 
             self.all_records.append({
-                "type_label": "NONG",
+                "source": "NONG",
                 "state": state,
                 "name": name,
                 "author": author,
-                "details": details,
+                "dls": dls_str,
+                "raw_dls": downloads,
+                "type": state,
+                "level_id": level_str,
+                "format": format_str,
                 "hash": hash_val,
                 "is_original": False,
                 "meta": {
