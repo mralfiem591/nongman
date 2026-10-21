@@ -31,7 +31,7 @@ NONGman supports `.mp3`, `.wav`, and `.ogg` files.
 Because that is too hard, and will come at a later stage of development. Also, they are riskier to restore.
 
 ## Why not other file types?
-First reason of the question above.
+First reason of the question above. Also, the file types currently supported covers like 99.9% of SFH, so it just isn't worth the work to support like 3 new tracks.
 
 ## Credits
 - **Jukebox**: For inspiring this project
