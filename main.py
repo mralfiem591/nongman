@@ -20,7 +20,7 @@ NEWGROUNDS_DOWNLOAD_URL = "https://www.newgrounds.com/audio/download/{song_id}"
 GH_REPO_URL = "https://github.com/mralfiem591/nongman"
 GH_API_LATEST_RELEASE = "https://api.github.com/repos/mralfiem591/nongman/releases/latest"
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 DEFAULT_HEADERS = {
     "User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) NONGman/{VERSION} {GH_REPO_URL}"
