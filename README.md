@@ -10,7 +10,7 @@ A NONG means "Not On NewGrounds". It is any track that does not exist on Newgrou
 ## By using NONGman, am I locking myself out of the original song?
 **No!** NONGman can revert most changes by pulling the original from Newgrounds (you will see the original song as an entry in available NONGs).
 
-> [!NOTE]
+> [!WARNING]
 > This is not guaranteed to work for all songs. In those cases, delete the track in Geometry Dash, and redownload it ingame.
 
 ## Where do I get NONGman?
